@@ -31,20 +31,26 @@ export class DsAssignmentTwoStack extends cdk.Stack {
             new s3notify.SnsDestination(newImageTopic)
         );
 
+        // Dead Letter Queue for invalid image processing
+        const dlq = new sqs.Queue(this, "InvalidImagesDLQ", {
+            visibilityTimeout: cdk.Duration.seconds(300),
+
+            retentionPeriod: cdk.Duration.days(14),
+        });
+
         // SQS Queue for processing images
         const imageProcessQueue = new sqs.Queue(this, "ImageProcessQueue", {
             receiveMessageWaitTime: cdk.Duration.seconds(5),
             visibilityTimeout: cdk.Duration.seconds(30),
+            deadLetterQueue: {
+                queue: dlq,
+                maxReceiveCount: 3, // After 3 failed attempts, send to DLQ
+            },
         });
 
         // Subscribe the queue to the topic with a filter for image processing
         newImageTopic.addSubscription(
-            new sns_subs.SqsSubscription(imageProcessQueue, {
-                filterPolicy: {
-                    // This filter will need to be adjusted based on the message format
-                    // For S3 notifications, we're relying on the default message structure
-                },
-            })
+            new sns_subs.SqsSubscription(imageProcessQueue)
         );
 
         // DynamoDB table for storing image metadata
@@ -70,6 +76,21 @@ export class DsAssignmentTwoStack extends cdk.Stack {
             }
         );
 
+        // Lambda function to remove invalid images
+        const removeImageFn = new lambdanode.NodejsFunction(
+            this,
+            "RemoveImageFunction",
+            {
+                runtime: lambda.Runtime.NODEJS_16_X,
+                entry: `${__dirname}/../lambdas/removeImage.ts`,
+                timeout: cdk.Duration.seconds(15),
+                memorySize: 128,
+                environment: {
+                    BUCKET_NAME: imagesBucket.bucketName,
+                },
+            }
+        );
+
         // Add SQS as an event source for the Lambda
         logImageFn.addEventSource(
             new lambdaEventSources.SqsEventSource(imageProcessQueue, {
@@ -77,9 +98,19 @@ export class DsAssignmentTwoStack extends cdk.Stack {
             })
         );
 
+        // Add DLQ as an event source for the Remove Image Lambda
+        removeImageFn.addEventSource(
+            new lambdaEventSources.SqsEventSource(dlq, {
+                batchSize: 1, // Process 1 message at a time
+            })
+        );
+
         // Grant permissions to the Lambda function
         imagesBucket.grantRead(logImageFn);
         imageTable.grantWriteData(logImageFn);
+
+        // Need write access to delete objects (dlq)
+        imagesBucket.grantReadWrite(removeImageFn);
 
         // Output
         new cdk.CfnOutput(this, "BucketName", {
