@@ -8,6 +8,7 @@ import * as s3 from "aws-cdk-lib/aws-s3";
 import * as s3notify from "aws-cdk-lib/aws-s3-notifications";
 import * as sns from "aws-cdk-lib/aws-sns";
 import * as sns_subs from "aws-cdk-lib/aws-sns-subscriptions";
+
 import * as lambdaEventSources from "aws-cdk-lib/aws-lambda-event-sources";
 
 export class DsAssignmentTwoStack extends cdk.Stack {
@@ -49,9 +50,9 @@ export class DsAssignmentTwoStack extends cdk.Stack {
         });
 
         // Subscribe the queue to the topic with a filter for image processing
-        newImageTopic.addSubscription(
-            new sns_subs.SqsSubscription(imageProcessQueue)
-        );
+        // newImageTopic.addSubscription(
+        //     new sns_subs.SqsSubscription(imageProcessQueue)
+        // );
 
         // DynamoDB table for storing image metadata
         const imageTable = new dynamodb.Table(this, "ImageTable", {
@@ -91,17 +92,61 @@ export class DsAssignmentTwoStack extends cdk.Stack {
             }
         );
 
+        // Lambda function to add metadata to images
+        const addMetadataFn = new lambdanode.NodejsFunction(
+            this,
+            "AddMetadataFunction",
+            {
+                runtime: lambda.Runtime.NODEJS_16_X,
+                entry: `${__dirname}/../lambdas/addMetadata.ts`,
+                timeout: cdk.Duration.seconds(15),
+                memorySize: 128,
+                environment: {
+                    IMAGE_TABLE_NAME: imageTable.tableName,
+                },
+            }
+        );
+
+        // Subscribe the queue to the topic
+        // We'll filter out metadata messages by only accepting messages WITHOUT metadata_type
+
+        newImageTopic.addSubscription(
+            new sns_subs.SqsSubscription(imageProcessQueue)
+        );
+
+        // newImageTopic.addSubscription(
+        //     new sns_subs.SqsSubscription(imageProcessQueue, {
+        //         filterPolicy: {
+        //             eventName: sns.SubscriptionFilter.stringFilter({
+        //                 allowlist: ["ObjectCreated:Put", "ObjectCreated:Post"],
+        //             }),
+        //         },
+        //     })
+        // );
+
         // Add SQS as an event source for the Lambda
         logImageFn.addEventSource(
             new lambdaEventSources.SqsEventSource(imageProcessQueue, {
-                batchSize: 5, // Process 5 messages at a time
+                batchSize: 5,
             })
         );
 
         // Add DLQ as an event source for the Remove Image Lambda
         removeImageFn.addEventSource(
             new lambdaEventSources.SqsEventSource(dlq, {
-                batchSize: 1, // Process 1 message at a time
+                batchSize: 1,
+            })
+        );
+
+        // Subscribe the Add Metadata Lambda directly to the SNS topic
+        // with a filter for metadata messages
+        newImageTopic.addSubscription(
+            new sns_subs.LambdaSubscription(addMetadataFn, {
+                filterPolicy: {
+                    metadata_type: sns.SubscriptionFilter.stringFilter({
+                        allowlist: ["Caption", "Date", "name"],
+                    }),
+                },
             })
         );
 
@@ -111,6 +156,8 @@ export class DsAssignmentTwoStack extends cdk.Stack {
 
         // Need write access to delete objects (dlq)
         imagesBucket.grantReadWrite(removeImageFn);
+
+        imageTable.grantReadWriteData(addMetadataFn);
 
         // Output
         new cdk.CfnOutput(this, "BucketName", {
