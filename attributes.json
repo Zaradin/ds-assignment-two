@@ -1,6 +1,6 @@
 {
-    "message_type": {
+    "metadata_type": {
         "DataType": "String",
-        "StringValue": "status_update"
+        "StringValue": "Date"
     }
 }
