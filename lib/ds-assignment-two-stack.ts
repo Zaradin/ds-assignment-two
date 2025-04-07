@@ -107,6 +107,21 @@ export class DsAssignmentTwoStack extends cdk.Stack {
             }
         );
 
+        // Lambda function to Create the Update Status Lambda
+        const updateStatusFn = new lambdanode.NodejsFunction(
+            this,
+            "UpdateStatusFunction",
+            {
+                runtime: lambda.Runtime.NODEJS_16_X,
+                entry: `${__dirname}/../lambdas/updateStatus.ts`,
+                timeout: cdk.Duration.seconds(15),
+                memorySize: 128,
+                environment: {
+                    IMAGE_TABLE_NAME: imageTable.tableName,
+                },
+            }
+        );
+
         // Subscribe the queue to the topic
         // We'll filter out metadata messages by only accepting messages WITHOUT metadata_type
 
@@ -150,14 +165,29 @@ export class DsAssignmentTwoStack extends cdk.Stack {
             })
         );
 
+        // Subscribe the Update Status Lambda to the SNS topic with a filter
+        // This filters for messages that contain an "update" field but no metadata_type attribute
+        newImageTopic.addSubscription(
+            new sns_subs.LambdaSubscription(updateStatusFn, {
+                filterPolicy: {
+                    // Only process messages with the message_type attribute set to "status_update"
+                    message_type: sns.SubscriptionFilter.stringFilter({
+                        allowlist: ["status_update"],
+                    }),
+                },
+            })
+        );
+
         // Grant permissions to the Lambda function
         imagesBucket.grantRead(logImageFn);
         imageTable.grantWriteData(logImageFn);
 
-        // Need write access to delete objects (dlq)
+        // Grant write access to delete objects (dlq)
         imagesBucket.grantReadWrite(removeImageFn);
 
+        // Grant ReadWrite to add and update lambda
         imageTable.grantReadWriteData(addMetadataFn);
+        imageTable.grantReadWriteData(updateStatusFn);
 
         // Output
         new cdk.CfnOutput(this, "BucketName", {
