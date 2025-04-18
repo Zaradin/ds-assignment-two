@@ -8,8 +8,8 @@ import * as s3 from "aws-cdk-lib/aws-s3";
 import * as s3notify from "aws-cdk-lib/aws-s3-notifications";
 import * as sns from "aws-cdk-lib/aws-sns";
 import * as sns_subs from "aws-cdk-lib/aws-sns-subscriptions";
-
 import * as lambdaEventSources from "aws-cdk-lib/aws-lambda-event-sources";
+import * as iam from "aws-cdk-lib/aws-iam";
 
 export class DsAssignmentTwoStack extends cdk.Stack {
     constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -59,6 +59,7 @@ export class DsAssignmentTwoStack extends cdk.Stack {
             partitionKey: { name: "id", type: dynamodb.AttributeType.STRING },
             billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
             removalPolicy: cdk.RemovalPolicy.DESTROY,
+            stream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
         });
 
         // Lambda functions
@@ -120,6 +121,27 @@ export class DsAssignmentTwoStack extends cdk.Stack {
                     IMAGE_TABLE_NAME: imageTable.tableName,
                 },
             }
+        );
+
+        // Create the Status Update Mailer Lambda
+        const statusUpdateMailerFn = new lambdanode.NodejsFunction(
+            this,
+            "StatusUpdateMailerFunction",
+            {
+                runtime: lambda.Runtime.NODEJS_16_X,
+                entry: `${__dirname}/../lambdas/statusUpdateMailer.ts`,
+                timeout: cdk.Duration.seconds(15),
+                memorySize: 128,
+            }
+        );
+
+        // Set up the DynamoDB Stream as an event source for the Lambda
+        statusUpdateMailerFn.addEventSource(
+            new lambdaEventSources.DynamoEventSource(imageTable, {
+                startingPosition: lambda.StartingPosition.LATEST,
+                batchSize: 1,
+                retryAttempts: 3,
+            })
         );
 
         // Subscribe the queue to the topic
@@ -188,6 +210,19 @@ export class DsAssignmentTwoStack extends cdk.Stack {
         // Grant ReadWrite to add and update lambda
         imageTable.grantReadWriteData(addMetadataFn);
         imageTable.grantReadWriteData(updateStatusFn);
+
+        // Grant necessary permissions
+        statusUpdateMailerFn.addToRolePolicy(
+            new iam.PolicyStatement({
+                effect: iam.Effect.ALLOW,
+                actions: [
+                    "ses:SendEmail",
+                    "ses:SendRawEmail",
+                    "ses:SendTemplatedEmail",
+                ],
+                resources: ["*"],
+            })
+        );
 
         // Output
         new cdk.CfnOutput(this, "BucketName", {
